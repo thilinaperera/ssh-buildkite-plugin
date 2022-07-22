@@ -1,0 +1,204 @@
+#!/bin/bash
+
+PORT=${BUILDKITE_PLUGIN_SSH_PORT:-22}
+PRIVATE_KEY="$(eval echo \"\$$BUILDKITE_PLUGIN_SSH_PRIVATE_KEY_ENV_VARIABLE\")"
+SSH_SERVER_ADDRESS="$(eval echo \"\$$BUILDKITE_PLUGIN_SSH_SERVER_ADDRESS_ENV_VARIABLE\")"
+
+if [ -z $SSH_AGENT_PID ]; then
+   eval `ssh-agent`
+fi
+
+ssh-keyscan -H "${SSH_SERVER_ADDRESS}" >> ~/.ssh/known_hosts
+
+echo "+++ Checking preconditions"
+
+echo "... Testing SSH connection"
+ssh-add -t 20 - <<< "${PRIVATE_KEY}" >/dev/null 2>&1
+ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} 'echo "Connection Test"' >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+    echo -e "\xE2\x9C\x94 SSH connection succeeded."
+else
+    echo -e "\xE2\x9D\x8C SSH connection failed."
+    exit 1
+fi
+
+printf "\n"
+
+injected_env_variables=()
+envVariableDefinition=""
+printableEnvVariableDefinition=""
+
+while IFS='=' read -r injected_env_variable _ ; do
+  if [[ $injected_env_variable =~ ^(BUILDKITE_PLUGIN_SSH_INJECTED_ENV_VARIABLES_[0-9]+$) ]]; then
+    MULTIPLE_INJECTED_ENV_VARIABLES="true"
+    injected_env_variables+=("${!injected_env_variable}")
+  fi
+done < <(env | sort)
+
+if [[ "${MULTIPLE_INJECTED_ENV_VARIABLES}" == "true" ]]; then
+    index=0
+
+    for injected_env_variable in "${injected_env_variables[@]}"
+    do
+        injected_env_variable_env_var="BUILDKITE_PLUGIN_SSH_INJECTED_ENV_VARIABLES_${index}"
+
+        injected_env_variable_name="${!injected_env_variable_env_var}"
+
+        esc_value=$(sed "s|\\\\|\\\\\\\\\\\\\\\\|g" <<< ${!injected_env_variable_name})
+        esc_value=$(sed "s|'|\\\\'|g" <<< ${esc_value})
+        esc_value=$(sed "s|\"|\\\\\\\\\"|g" <<< $esc_value)
+        esc_value=$(sed "s|\`|\\\\\\\`|g" <<< $esc_value)
+
+        envVariableDefinition="${envVariableDefinition} ${injected_env_variable_name}=\"${esc_value}\""
+        printableEnvVariableDefinition="${printableEnvVariableDefinition} ${injected_env_variable_name}=\"**obscured**\""
+
+        ((index+=1))
+    done
+fi
+
+commands=()
+printableCommands=()
+allCommandsValid=true
+
+IFS=$'\n'
+for command in $BUILDKITE_COMMAND
+do
+    rawCommand=$(echo $command | cut -d " " -f 1)
+
+    echo "... Processing command $rawCommand"
+    printf "\n"
+
+    if [[ ! ${#rawCommand} == ${#command} ]]; then
+        commandOptions=$(echo $command | cut -c $((${#rawCommand} + 2))-${#command})
+    fi
+
+    echo -e "... Checking if $rawCommand exists as script file on server."
+    ssh-add -t 20 - <<< "${PRIVATE_KEY}" >/dev/null 2>&1
+    ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} "bash -c \"if [[ -f $rawCommand ]] ; then exit 0; else exit 1; fi\""
+    if [ $? -eq 0 ]; then
+        echo -e "\xE2\x9C\x94 Script file $rawCommand found on server."
+        scriptFileOnServer=true
+    else
+        echo -e "\xE2\x9D\x8C Script file $rawCommand not found on server."
+        scriptFileOnServer=false
+    fi
+
+    printf "\n"
+
+    echo "... Checking if $rawCommand exists as script file on agent."
+    if [[ -f $rawCommand ]] ; then
+        echo -e "\xE2\x9C\x94 Script file $rawCommand found on agent."
+        scriptFileOnAgent=true
+    else
+        echo -e "\xE2\x9D\x8C Script file $rawCommand not found on agent."
+        scriptFileOnAgent=false
+    fi
+
+    printf "\n"
+
+    echo "... Checking if $rawCommand exists as command on server."
+    ssh-add -t 20 - <<< "${PRIVATE_KEY}" >/dev/null 2>&1
+    rawCommandSource=$(ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} "bash -c \"command -v $rawCommand\"")
+    if [ $? -eq 0 ]; then
+        echo -e "\xE2\x9C\x94 Command or script $rawCommand found on server: $rawCommandSource"
+        commandOnServer=true
+    else
+        echo -e "\xE2\x9D\x8C Command or script $rawCommand not found on server."
+        commandOnServer=false
+    fi
+
+    printf "\n"
+
+    echo "... Checking if $rawCommand exists as command on agent."
+    rawCommandSource=$(command -v $rawCommand)
+    if [ $? -eq 0 ]; then
+        echo -e "\xE2\x9C\x94 Command or script $rawCommand found on agent: $rawCommandSource"
+        commandOnAgent=true
+    else
+        echo -e "\xE2\x9D\x8C Command or script $rawCommand not found on agent."
+        commandOnAgent=false
+    fi
+
+    printf "\n"
+
+    if [[ "$scriptFileOnServer" == true || "$scriptFileOnAgent" == true || "$commandOnServer" == true || "$commandOnAgent" == true ]]; then
+        echo -e "\xE2\x9C\x94 Command $command is valid and can be executed."
+    else
+        allCommandsValid=false
+    fi
+
+    printf "\n"
+
+    if [[ "$commandOnServer" == true ]]; then
+        command=$(sed "s|\$|\\\\$|g" <<< ${command})
+        sshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${envVariableDefinition}' bash -c -- \"'${command}'\""
+        if [[ "$BUILDKITE_PLUGIN_SSH_DEBUG" == true ]]; then
+          printableSshCommand="$sshCommand"
+        else
+          printableSshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${printableEnvVariableDefinition}' bash -c -- \"'${command}'\""
+        fi
+        echo "Using command from server: $printableSshCommand"
+        commands+=($sshCommand)
+        printableCommands+=($printableSshCommand)
+    elif [[ "$scriptFileOnServer" == true ]]; then
+        sshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${envVariableDefinition}' bash $command"
+        if [[ "$BUILDKITE_PLUGIN_SSH_DEBUG" == true ]]; then
+          printableSshCommand="$sshCommand"
+        else
+          printableSshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${printableEnvVariableDefinition}' bash $command"
+        fi
+
+        echo "Using script file from server: $printableSshCommand"
+        commands+=($sshCommand)
+        printableCommands+=($printableSshCommand)
+    elif [[ "$commandOnAgent" == true ]]; then
+        sshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${envVariableDefinition}' bash -s -- < ${rawCommandSource} ${commandOptions}"
+        if [[ "$BUILDKITE_PLUGIN_SSH_DEBUG" == true ]]; then
+          printableSshCommand="$sshCommand"
+        else
+          printableSshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${printableEnvVariableDefinition}' bash -s -- < ${rawCommandSource} ${commandOptions}"
+        fi
+
+        echo "Using command from agent: $printableSshCommand"
+        commands+=($sshCommand)
+        printableCommands+=($printableSshCommand)
+    elif [[ "$scriptFileOnAgent" == true ]]; then
+        sshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${envVariableDefinition}' bash -s < ${command}"
+        if [[ "$BUILDKITE_PLUGIN_SSH_DEBUG" == true ]]; then
+          printableSshCommand="$sshCommand"
+        else
+          printableSshCommand="ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} -- \$'${printableEnvVariableDefinition}' bash -s -- < ${rawCommandSource} ${commandOptions}"
+        fi
+
+        echo "Using script file from agent: $printableSshCommand"
+        commands+=($sshCommand)
+        printableCommands+=($printableSshCommand)
+    fi
+
+    printf "\n"
+done
+
+if [[ "$allCommandsValid" == true ]]; then
+    echo -e "\xE2\x9C\x94 Preconditions are met."
+    echo "^^^ ---"
+else
+    echo -e "\xE2\x9D\x8C Preconditions are not met. Aborting execution."
+    exit 1
+fi
+
+echo "+++ Executing commands on remote server."
+commandIndex=0
+for command in "${commands[@]}"
+do
+    echo "Executing command \"${printableCommands[$commandIndex]}\""
+    ssh-add -t 20 - <<< "${PRIVATE_KEY}" >/dev/null 2>&1
+    bash -c -- $command
+    if [ $? -eq 0 ]; then
+        echo -e "\xE2\x9C\x94 Command executed successfully."
+    else
+        echo -e "\xE2\x9D\x8C Command failed. Aborting execution."
+        exit 1
+    fi
+    printf "\n"
+    ((commandIndex+=1))
+done
