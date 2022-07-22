@@ -18,6 +18,7 @@ echo "PRIVATE_KEY ${PRIVATE_KEY}"
 
 echo "... Testing SSH connection"
 ssh-add -t 20 - <<< "${PRIVATE_KEY}" >/dev/null 2>&1
+echo "... SSH key added"
 ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} 'echo "Connection Test"' >/dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo -e "\xE2\x9C\x94 SSH connection succeeded."
