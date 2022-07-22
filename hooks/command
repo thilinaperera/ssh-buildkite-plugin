@@ -12,6 +12,10 @@ ssh-keyscan -H "${SSH_SERVER_ADDRESS}" >> ~/.ssh/known_hosts
 
 echo "+++ Checking preconditions"
 
+echo "+++ Checking preconditions"
+echo "SSH_SERVER_ADDRESS: ${SSH_SERVER_ADDRESS}"
+echo "PRIVATE_KEY ${PRIVATE_KEY}"
+
 echo "... Testing SSH connection"
 ssh-add -t 20 - <<< "${PRIVATE_KEY}" >/dev/null 2>&1
 ssh -p ${PORT} ${BUILDKITE_PLUGIN_SSH_USERNAME}@${SSH_SERVER_ADDRESS} 'echo "Connection Test"' >/dev/null 2>&1
