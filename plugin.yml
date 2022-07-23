@@ -1,6 +1,6 @@
 name: SSH
 description: Execute commands on remote servers.
-author: https://adabay.rocks
+author: https://github.com/thilinaperera
 requirements: []
 configuration:
   properties:
@@ -12,6 +12,8 @@ configuration:
       type: string
     private_key_env_variable:
       type: string
+    server_address_env_variable:
+      type: string
     injected_env_variables:
       type: array
     debug:
@@ -20,3 +22,4 @@ configuration:
     - server_address
     - username
     - private_key_env_variable
+    - server_address_env_variable
